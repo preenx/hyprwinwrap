@@ -1,6 +1,6 @@
 # hyprwinwrap
 
-Clone of xwinwrap for hyprland.
+Clone of xwinwrap for hyprland. Need hypr 0.54+.
 
 Example config:
 ```ini
