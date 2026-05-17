@@ -1,0 +1,41 @@
+/build/
+
+# CMake files
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Object files and libraries
+*.o
+*.obj
+*.so
+*.a
+*.lo
+
+# Logs and temporary files
+*.log
+*.out
+*.tmp
+*~
+*.swp
+
+# IDEs and editors
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# Distribution
+/dist/
+
+# Coverage and test artifacts
+coverage/
+.pytest_cache/
+
+# Misc
+tags
+*.pid
