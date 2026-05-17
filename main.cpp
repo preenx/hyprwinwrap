@@ -60,31 +60,18 @@ static void clearWindowRules()
     bgRules.clear();
 }
 
-void onNewWindow(PHLWINDOW pWindow)
+static void applyBgWindowGeometry(PHLWINDOW pWindow)
 {
-    static auto *const PCLASS = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:class")->getDataStaticPtr();
-    static auto *const PTITLE = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:title")->getDataStaticPtr();
-
     static auto *const PSIZEX = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:size_x")->getDataStaticPtr();
     static auto *const PSIZEY = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:size_y")->getDataStaticPtr();
     static auto *const PPOSX = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:pos_x")->getDataStaticPtr();
     static auto *const PPOSY = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:pos_y")->getDataStaticPtr();
-
-    const std::string classRule(*PCLASS);
-    const std::string titleRule(*PTITLE);
-
-    const bool classMatches = !classRule.empty() && pWindow->m_initialClass == classRule;
-    const bool titleMatches = !titleRule.empty() && pWindow->m_title == titleRule;
-
-    if (!classMatches && !titleMatches)
-        return;
 
     const auto PMONITOR = pWindow->m_monitor.lock();
     if (!PMONITOR)
         return;
 
     float sx = 100.f, sy = 100.f, px = 0.f, py = 0.f;
-
     try
     {
         sx = std::stof(*PSIZEX);
@@ -128,27 +115,48 @@ void onNewWindow(PHLWINDOW pWindow)
     const Vector2D monitorPos = PMONITOR->m_position;
 
     const Vector2D newSize = {static_cast<int>(monitorSize.x * (sx / 100.f)), static_cast<int>(monitorSize.y * (sy / 100.f))};
-
     const Vector2D newPos = {static_cast<int>(monitorPos.x + (monitorSize.x * (px / 100.f))), static_cast<int>(monitorPos.y + (monitorSize.y * (py / 100.f)))};
 
     const CBox b(newPos.x, newPos.y, newSize.x, newSize.y);
     auto target = pWindow->layoutTarget();
+    target->setPositionGlobal(b);
+    target->warpPositionSize();
 
+    pWindow->m_realSize->setValueAndWarp(newSize);
+    pWindow->m_realPosition->setValueAndWarp(newPos);
+    pWindow->sendWindowSize(true);
+}
+
+void onNewWindow(PHLWINDOW pWindow)
+{
+    static auto *const PCLASS = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:class")->getDataStaticPtr();
+    static auto *const PTITLE = (Hyprlang::STRING const *)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprwinwrap:title")->getDataStaticPtr();
+
+    const std::string classRule(*PCLASS);
+    const std::string titleRule(*PTITLE);
+
+    const bool classMatches = !classRule.empty() && pWindow->m_initialClass == classRule;
+    const bool titleMatches = !titleRule.empty() && pWindow->m_title == titleRule;
+
+    if (!classMatches && !titleMatches)
+        return;
+
+    const auto PMONITOR = pWindow->m_monitor.lock();
+    if (!PMONITOR)
+        return;
+
+    auto target = pWindow->layoutTarget();
     if (!target->floating())
     {
         target->setFloating(true);
         pWindow->m_isFloating = true;
     }
 
-    target->setPositionGlobal(b);
-    target->warpPositionSize();
+    applyBgWindowGeometry(pWindow);
 
-    pWindow->m_realSize->setValueAndWarp(newSize);
-    pWindow->m_realPosition->setValueAndWarp(newPos);
-    pWindow->m_size = newSize;
-    pWindow->m_position = newPos;
+    pWindow->m_size = pWindow->m_realSize->value();
+    pWindow->m_position = pWindow->m_realPosition->value();
     pWindow->m_pinned = true;
-    pWindow->sendWindowSize(true);
 
     bgWindows.push_back(pWindow);
     pWindow->m_hidden = true;
@@ -272,6 +280,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
                                                                 { onRenderStage(stage); });
     static auto P4 = Event::bus()->m_events.config.reloaded.listen([&]
                                                                    { onConfigReloaded(); });
+
+    // Workspace changes can re-apply gap and border settings, shifting the window slightly
+    static auto P5 = Event::bus()->m_events.workspace.active.listen([&](PHLWORKSPACE ws)
+                                                                    {
+        for (auto &bg : bgWindows) {
+            const auto bgw = bg.lock();
+            if (!bgw)
+                continue;
+            applyBgWindowGeometry(bgw);
+            //HyprlandAPI::addNotification(PHANDLE, "set pos: " + std::to_string((int)bgw->m_realPosition->value().x) + "," + std::to_string((int)bgw->m_realPosition->value().y), CHyprColor{0.2, 1.0, 0.2, 1.0}, 3000);
+        } });
 
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, "_ZN7Desktop4View11CSubsurface8onCommitEv");
     if (fns.size() < 1)
