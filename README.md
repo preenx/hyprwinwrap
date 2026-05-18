@@ -2,6 +2,12 @@
 
 Clone of xwinwrap for hyprland. Need hypr 0.54+.
 
+## Installing
+```
+hyprpm add https://github.com/gen3vra/hyprwinwrap
+hyprpm enable hyprwinwrap
+```
+
 Example config:
 ```ini
 plugin {
