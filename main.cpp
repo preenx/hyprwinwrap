@@ -11,6 +11,7 @@
 #define protected public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/rule/Engine.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRule.hpp>
@@ -22,6 +23,7 @@
 #undef private
 #undef protected
 
+#include <unordered_map>
 #include <hyprland/src/layout/space/Space.hpp>
 #include <hyprland/src/layout/target/Target.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
@@ -41,6 +43,8 @@ typedef void (*origCommit)(void *owner, void *data);
 
 std::vector<PHLWINDOWREF> bgWindows;
 std::vector<SP<Desktop::Rule::IRule>> bgRules;
+std::unordered_map<PHLWINDOW, bool> interactableStates;
+bool anyInteractive = false;
 
 static SP<Config::Values::CStringValue> gCfgClass;
 static SP<Config::Values::CStringValue> gCfgTitle;
@@ -55,6 +59,9 @@ static SP<Desktop::Rule::CWindowRule> makeWindowRule(const std::string &name, co
     rule->registerMatch(prop, "^(" + match + ")$");
     rule->addEffect(Desktop::Rule::WINDOW_RULE_EFFECT_FLOAT, "1");
     rule->addEffect(Desktop::Rule::WINDOW_RULE_EFFECT_SIZE, "100% 100%");
+    rule->addEffect(Desktop::Rule::WINDOW_RULE_EFFECT_NO_DIM, "1");      // prevent interactive switch causing any brightness change from focus
+    rule->addEffect(Desktop::Rule::WINDOW_RULE_EFFECT_BORDER_SIZE, "0"); // prevent border flash when focused interactively
+    rule->addEffect(Desktop::Rule::WINDOW_RULE_EFFECT_NO_SHADOW, "1");
     return rule;
 }
 
@@ -158,8 +165,11 @@ void onNewWindow(PHLWINDOW pWindow)
     pWindow->m_position = pWindow->m_realPosition->value();
     pWindow->m_pinned = true;
 
+    interactableStates[pWindow] = false;
     bgWindows.push_back(pWindow);
     pWindow->m_hidden = true;
+
+    pWindow->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
 
     g_pInputManager->refocus();
 }
@@ -168,6 +178,7 @@ void onCloseWindow(PHLWINDOW pWindow)
 {
     std::erase_if(bgWindows, [pWindow](const auto &ref)
                   { return ref.expired() || ref.lock() == pWindow; });
+    interactableStates.erase(pWindow);
 }
 
 void onRenderStage(eRenderStage stage)
@@ -182,11 +193,13 @@ void onRenderStage(eRenderStage stage)
         if (bgw->m_monitor != g_pHyprRenderer->m_renderData.pMonitor)
             continue;
 
-        // cant use setHidden cuz that sends suspended and shit too that would be laggy
+        const bool interactable = interactableStates.contains(bgw) ? interactableStates[bgw] : false;
+        if (interactable)
+            continue; // pinned-always-above Hypr pass handles it on top
+
+        // cant use setHidden cuz that sends suspended and stuff that would be laggy
         bgw->m_hidden = false;
-
         g_pHyprRenderer->renderWindow(bgw, g_pHyprRenderer->m_renderData.pMonitor.lock(), Time::steadyNow(), false, Render::RENDER_PASS_ALL, false, true);
-
         bgw->m_hidden = true;
     }
 }
@@ -202,14 +215,15 @@ void onCommitSubsurface(Desktop::View::CSubsurface *thisptr)
         return;
     }
 
-    // cant use setHidden cuz that sends suspended and shit too that would be laggy
+    // cant use setHidden cuz that sends suspended and stuff that would be laggy
     PWINDOW->m_hidden = false;
 
     ((origCommitSubsurface)subsurfaceHook->m_original)(thisptr);
     if (const auto MON = PWINDOW->m_monitor.lock(); MON)
         g_pHyprRenderer->damageMonitor(MON);
 
-    PWINDOW->m_hidden = true;
+    const bool interactable = interactableStates.contains(PWINDOW) ? interactableStates[PWINDOW] : false;
+    PWINDOW->m_hidden = !interactable;
 }
 
 void onCommit(void *owner, void *data)
@@ -223,14 +237,60 @@ void onCommit(void *owner, void *data)
         return;
     }
 
-    // cant use setHidden cuz that sends suspended and shit too that would be laggy
+    // cant use setHidden cuz that sends suspended and stuff that would be laggy
     PWINDOW->m_hidden = false;
 
     ((origCommit)commitHook->m_original)(owner, data);
     if (const auto MON = PWINDOW->m_monitor.lock(); MON)
         g_pHyprRenderer->damageMonitor(MON);
 
-    PWINDOW->m_hidden = true;
+    const bool interactable = interactableStates.contains(PWINDOW) ? interactableStates[PWINDOW] : false;
+    PWINDOW->m_hidden = !interactable;
+}
+
+SDispatchResult dispatchToggleInteractivity(std::string)
+{
+    if (bgWindows.empty())
+    {
+        HyprlandAPI::addNotification(PHANDLE, "[hyprwinwrap] No bg windows",
+                                     CHyprColor{1.0, 1.0, 0.2, 1.0}, 2500);
+        return SDispatchResult{.success = false, .error = "no background windows"};
+    }
+
+    int toggled = 0;
+    for (auto &bg : bgWindows)
+    {
+        const auto bgw = bg.lock();
+        if (!bgw)
+            continue;
+
+        auto it = interactableStates.find(bgw);
+        if (it == interactableStates.end())
+            continue;
+
+        it->second = !it->second;
+        bgw->m_hidden = !it->second;
+        toggled++;
+
+        // TODO: Way to select which bg window to focus? Works fine if you only have one bg window :)
+        if (it->second)
+        {
+            bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(false, Desktop::Types::PRIORITY_SET_PROP));
+            Desktop::focusState()->fullWindowFocus(bgw, Desktop::FOCUS_REASON_OTHER);
+        }
+        else
+        {
+            bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
+        }
+        anyInteractive = it->second;
+    }
+
+    // May not be setting keyboard focus to right window if there are multiple bg windows
+    if (toggled > 1)
+        HyprlandAPI::addNotification(PHANDLE,
+                                     std::string{"[hyprwinwrap] toggled "} + std::to_string(toggled) + " window(s)",
+                                     CHyprColor{0.2, 0.8, 1.0, 1.0}, 2500);
+    return SDispatchResult{};
 }
 
 void onConfigReloaded()
@@ -289,6 +349,25 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             applyBgWindowGeometry(bgw);
             //HyprlandAPI::addNotification(PHANDLE, "set pos: " + std::to_string((int)bgw->m_realPosition->value().x) + "," + std::to_string((int)bgw->m_realPosition->value().y), CHyprColor{0.2, 1.0, 0.2, 1.0}, 3000);
         } });
+
+    // Interacting with bg window and change focus, 'toggle' state again
+    static auto P6 = Event::bus()->m_events.window.active.listen([&](PHLWINDOW w, Desktop::eFocusReason)
+                                                                 {
+        if (!anyInteractive)
+            return;
+        for (auto &bg : bgWindows) {
+            const auto bgw = bg.lock();
+            if (!bgw || bgw == w)
+                continue;
+            auto it = interactableStates.find(bgw);
+            if (it == interactableStates.end() || !it->second)
+                continue;
+            it->second = false;
+            bgw->m_hidden = true;
+            bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
+        }
+        anyInteractive = false; });
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hyprwinwrap_interactivity", dispatchToggleInteractivity);
 
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, "_ZN7Desktop4View11CSubsurface8onCommitEv");
     if (fns.size() < 1)
