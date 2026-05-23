@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <hyprland/src/layout/space/Space.hpp>
 #include <hyprland/src/layout/target/Target.hpp>
-#include <hyprland/src/config/values/ConfigValues.hpp>
+#include <hyprland/src/config/ConfigValues.hpp>
 #include "globals.hpp"
 
 // Do NOT change this function
